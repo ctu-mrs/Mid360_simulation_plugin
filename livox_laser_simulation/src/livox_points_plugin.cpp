@@ -159,7 +159,7 @@ void LivoxPointsPlugin::Load(gazebo::sensors::SensorPtr _parent, sdf::ElementPtr
         rayShape->AddRay(start_point, end_point);
     }
 
-    createStaticTransforms(raySensor->Pose());
+    createStaticTransforms(parentEntity->RelativePose());
     tf_pub_ = this->nh_.advertise<tf2_msgs::TFMessage>("/tf_gazebo_static", 10, false);
     timer_ = this->nh_.createWallTimer(ros::WallDuration(1.0), &LivoxPointsPlugin::publishStaticTransforms, this);
 }
