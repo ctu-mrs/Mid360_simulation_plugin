@@ -65,16 +65,36 @@ void LivoxPointsPlugin::Load(gazebo::sensors::SensorPtr _parent, sdf::ElementPtr
     auto scanElem = rayElem->GetElement("scan");
     auto rangeElem = rayElem->GetElement("range");
 
-    int argc = 0;
-    char **argv = nullptr;
+    std::string robot_namespace = "/";
+    if (sdf->HasElement("robotNamespace"))
+      robot_namespace = sdf->GetElement("robotNamespace")->Get<std::string>();
+
+    // Make sure the ROS node for Gazebo has already been initialized
+    if (!ros::isInitialized())
+    {
+      ROS_FATAL_STREAM("A ROS node for Gazebo has not been initialized, unable to load plugin. "
+                       << "Load the Gazebo system plugin 'liblivox_laser_simulation.so' in the gazebo_ros package)");
+      return;
+    }
+    nh_ = ros::NodeHandle(robot_namespace);
+
+    /* Load TF-related parameters //{ */
+    
+    if (!sdf->HasElement("parentFrameName"))
+    {
+      ROS_INFO_NAMED("LivoxPointsPlugin", "LivoxPointsPlugin plugin missing <parentFrameName>, defaults to \"fcu\"");
+      this->parent_frame_name_ = "fcu";
+    } else
+      this->parent_frame_name_ = sdf->Get<std::string>("parentFrameName");
+    
+    //}
+
     auto curr_scan_topic = sdf->Get<std::string>("ros_topic");
-    frameName = sdf->Get<std::string>("frameName");
-    ROS_INFO_STREAM("ros topic name:" << curr_scan_topic);
-    ROS_INFO_STREAM("ros frame id: "<<frameName);
+    sensor_frame_name_ = sdf->Get<std::string>("frameName");
+    ROS_INFO_STREAM("ros topic name:\t" << curr_scan_topic);
+    ROS_INFO_STREAM("ros frame id:\t" << sensor_frame_name_);
 
     raySensor = _parent;
-    auto sensor_pose = raySensor->Pose();
-    SendRosTf(sensor_pose, raySensor->ParentName(), raySensor->Name());
 
     node = transport::NodePtr(new transport::Node());
     node->Init(raySensor->WorldName());
@@ -104,18 +124,16 @@ void LivoxPointsPlugin::Load(gazebo::sensors::SensorPtr _parent, sdf::ElementPtr
 
     publishPointCloudType = sdfPtr->Get<int>("publish_pointcloud_type");
     ROS_INFO_STREAM("publish_pointcloud_type: " << publishPointCloudType);
-    ros::init(argc, argv, curr_scan_topic);
-    rosNode.reset(new ros::NodeHandle);
     switch (publishPointCloudType) {
         case SENSOR_MSG_POINT_CLOUD:
-            rosPointPub = rosNode->advertise<sensor_msgs::PointCloud>(curr_scan_topic, 5);
+            rosPointPub = nh_.advertise<sensor_msgs::PointCloud>(curr_scan_topic, 5);
             break;
         case SENSOR_MSG_POINT_CLOUD2_POINTXYZ:
         case SENSOR_MSG_POINT_CLOUD2_LIVOXPOINTXYZRTLT:
-            rosPointPub = rosNode->advertise<sensor_msgs::PointCloud2>(curr_scan_topic, 5);
+            rosPointPub = nh_.advertise<sensor_msgs::PointCloud2>(curr_scan_topic, 5);
             break;
         case livox_laser_simulation_CUSTOM_MSG:
-            rosPointPub = rosNode->advertise<livox_laser_simulation::CustomMsg>(curr_scan_topic, 5);
+            rosPointPub = nh_.advertise<livox_laser_simulation::CustomMsg>(curr_scan_topic, 5);
             break;
         default:
             break;
@@ -140,7 +158,48 @@ void LivoxPointsPlugin::Load(gazebo::sensors::SensorPtr _parent, sdf::ElementPtr
         end_point = maxDist * axis + offset.Pos();
         rayShape->AddRay(start_point, end_point);
     }
+
+    createStaticTransforms(raySensor->Pose());
+    tf_pub_ = this->nh_.advertise<tf2_msgs::TFMessage>("/tf_gazebo_static", 10, false);
+    timer_ = this->nh_.createWallTimer(ros::WallDuration(1.0), &LivoxPointsPlugin::publishStaticTransforms, this);
 }
+
+/* createStaticTransforms() //{ */
+
+void LivoxPointsPlugin::createStaticTransforms(const ignition::math::Pose3d &pose)
+{
+  geometry_msgs::TransformStamped static_transform_sensor_base;
+
+  const auto rot = pose.Rot();
+  const auto pos = pose.Pos();
+
+  ros::Time stamp = ros::Time::now();
+
+  static_transform_sensor_base.header.stamp = stamp;
+  static_transform_sensor_base.header.frame_id = this->parent_frame_name_;
+  static_transform_sensor_base.child_frame_id = this->sensor_frame_name_;
+  static_transform_sensor_base.transform.translation.x = pos.X();
+  static_transform_sensor_base.transform.translation.y = pos.Y();
+  static_transform_sensor_base.transform.translation.z = pos.Z();
+  static_transform_sensor_base.transform.rotation.x = rot.X();
+  static_transform_sensor_base.transform.rotation.y = rot.Y();
+  static_transform_sensor_base.transform.rotation.z = rot.Z();
+  static_transform_sensor_base.transform.rotation.w = rot.W();
+
+  this->tf_message_.transforms.push_back(static_transform_sensor_base);
+}
+
+//}
+
+/* publishStaticTransforms() //{ */
+
+void LivoxPointsPlugin::publishStaticTransforms([[maybe_unused]] const ros::WallTimerEvent& event)
+{
+  /* ROS_INFO("publishing"); */
+  this->tf_pub_.publish(this->tf_message_);
+}
+
+//}
 
 void LivoxPointsPlugin::OnNewLaserScans() {
     if (rayShape) {
@@ -357,7 +416,7 @@ void LivoxPointsPlugin::PublishPointCloud(std::vector<std::pair<int, AviaRotateI
 
     sensor_msgs::PointCloud scan_point;
     scan_point.header.stamp = ros::Time::now();
-    scan_point.header.frame_id = frameName;
+    scan_point.header.frame_id = sensor_frame_name_;
     scan_point.header.frame_id = "livox";
     auto &scan_points = scan_point.points;
     for (auto &pair : points_pair) {
@@ -457,7 +516,7 @@ void LivoxPointsPlugin::PublishPointCloud2XYZ(std::vector<std::pair<int, AviaRot
     pc.resize(pt_count);
     pcl::toROSMsg(pc, scan_point);
     scan_point.header.stamp = timestamp;
-    scan_point.header.frame_id = frameName;
+    scan_point.header.frame_id = sensor_frame_name_;
     rosPointPub.publish(scan_point);
     // SendRosTf(parentEntity->WorldPose(), world->Name(), raySensor->ParentName());
     ros::spinOnce();
@@ -527,7 +586,7 @@ void LivoxPointsPlugin::PublishPointCloud2XYZRTLT(std::vector<std::pair<int, Avi
     }
     pcl::toROSMsg(pc, scan_point);
     scan_point.header.stamp = header_timestamp;
-    scan_point.header.frame_id = frameName;
+    scan_point.header.frame_id = sensor_frame_name_;
     rosPointPub.publish(scan_point);
     ros::spinOnce();
     if (scanPub && scanPub->HasConnections() && visualize) {
@@ -552,7 +611,7 @@ void LivoxPointsPlugin::PublishLivoxROSDriverCustomMsg(std::vector<std::pair<int
     livox_laser_simulation::CustomMsg msg;
     // msg.header.frame_id = raySensor->ParentName();
 
-    msg.header.frame_id = frameName;
+    msg.header.frame_id = sensor_frame_name_;
 
     struct timespec tn; 
     clock_gettime(CLOCK_REALTIME, &tn);

@@ -9,6 +9,8 @@
 #include <gazebo/plugins/RayPlugin.hh>
 #include "livox_ode_multiray_shape.h"
 
+#include <tf2_msgs/TFMessage.h>
+
 namespace gazebo {
 struct AviaRotateInfo {
     double time;
@@ -104,17 +106,29 @@ class LivoxPointsPlugin : public RayPlugin {
     gazebo::sensors::SensorPtr raySensor;
     std::vector<AviaRotateInfo> aviaInfos;
 
-    std::shared_ptr<ros::NodeHandle> rosNode;
+    ros::NodeHandle nh_;
     ros::Publisher rosPointPub;
     std::shared_ptr<tf::TransformBroadcaster> tfBroadcaster;
 
+    // | ------------ TF-related parameters and members ----------- |
+    std::string parent_frame_name_;
+    std::string sensor_frame_name_;
+
+    void transformThread();
+    void createStaticTransforms(const ignition::math::Pose3d &pose);
+    void publishStaticTransforms(const ros::WallTimerEvent& event);
+    ros::Publisher tf_pub_;
+    tf2_msgs::TFMessage tf_message_;
+    ros::WallTimer timer_;
+    std::thread load_thread_;
+
+    // | --------------------- Some other shit -------------------- |
     int64_t samplesStep = 0;
     int64_t currStartIndex = 0;
     int64_t maxPointSize = 1000;
     int64_t downSample = 1;
     uint16_t publishPointCloudType;
     bool visualize = false;
-    std::string frameName = "livox";
 
     double maxDist = 400.0;
     double minDist = 0.1;
